@@ -29,13 +29,14 @@ class MockRepository:
     seed_repo: Path
     upstream_bare: Path
     patch_hashes: dict[str, str]
+    pinned_ref: str = ""
 
     def write_lockfile(self, *, patch_hashes: dict[str, str] | None = None) -> None:
         hashes = patch_hashes if patch_hashes is not None else self.patch_hashes
         lines = [
             f"upstream_url = {json.dumps(str(self.upstream_bare))}",
             'upstream_tarball_base = "https://example.invalid/dwm"',
-            'pinned_ref = ""',
+            f"pinned_ref = {json.dumps(self.pinned_ref)}",
             'dwm_version = "6.5"',
             "",
             "[patches]",

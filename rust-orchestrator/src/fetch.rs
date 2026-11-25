@@ -11,7 +11,7 @@ pub fn run_fetch(repo_root: &Path, args: &FetchArgs) -> Result<()> {
     let mut lockfile = Lockfile::load(&lock_path)
         .with_context(|| format!("loading lockfile {}", lock_path.display()))?;
 
-let resolved_ref = match args.source.clone() {
+    let resolved_ref = match args.source.clone() {
         FetchSource::Git => fetch_git(repo_root, &lockfile)?,
         FetchSource::Tarball => fetch_tarball(repo_root, &lockfile)?,
     };
@@ -61,6 +61,7 @@ fn fetch_git(repo_root: &Path, lockfile: &Lockfile) -> Result<String> {
         ensure_success(output.status.success(), "git fetch origin", &output.stderr)?;
     }
 
+    let mut resolved_ref = None;
     for reference in ["origin/master", "origin/main", "HEAD"] {
         let output = Command::new("git")
             .args(["-C"])
@@ -71,15 +72,72 @@ fn fetch_git(repo_root: &Path, lockfile: &Lockfile) -> Result<String> {
         if output.status.success() {
             let resolved = String::from_utf8(output.stdout)?.trim().to_owned();
             if !resolved.is_empty() {
-                return Ok(resolved);
+                resolved_ref = Some(resolved);
+                break;
             }
         }
     }
 
-    anyhow::bail!(
-        "could not resolve origin/master, origin/main, or HEAD in {}",
-        cache_dir.display()
-    )
+    let resolved_ref = resolved_ref.ok_or_else(|| {
+        anyhow::anyhow!(
+            "could not resolve origin/master, origin/main, or HEAD in {}",
+            cache_dir.display()
+        )
+    })?;
+    let pre_checkout_reset = Command::new("git")
+        .args(["-C"])
+        .arg(&cache_dir)
+        .args(["reset", "--hard"])
+        .output()
+        .context("cleaning upstream cache before checkout")?;
+    ensure_success(
+        pre_checkout_reset.status.success(),
+        "git reset --hard",
+        &pre_checkout_reset.stderr,
+    )?;
+    let pre_checkout_clean = Command::new("git")
+        .args(["-C"])
+        .arg(&cache_dir)
+        .args(["clean", "-fdx"])
+        .output()
+        .context("removing untracked files from upstream cache")?;
+    ensure_success(
+        pre_checkout_clean.status.success(),
+        "git clean -fdx",
+        &pre_checkout_clean.stderr,
+    )?;
+
+    let checkout = Command::new("git")
+        .args(["-C"])
+        .arg(&cache_dir)
+        .args(["checkout", "--detach"])
+        .arg(&resolved_ref)
+        .output()
+        .context("checking out resolved upstream commit")?;
+    ensure_success(
+        checkout.status.success(),
+        "git checkout --detach",
+        &checkout.stderr,
+    )?;
+
+    let reset = Command::new("git")
+        .args(["-C"])
+        .arg(&cache_dir)
+        .args(["reset", "--hard"])
+        .arg(&resolved_ref)
+        .output()
+        .context("resetting upstream cache to resolved commit")?;
+    ensure_success(reset.status.success(), "git reset --hard", &reset.stderr)?;
+
+    let clean = Command::new("git")
+        .args(["-C"])
+        .arg(&cache_dir)
+        .args(["clean", "-fdx"])
+        .output()
+        .context("removing untracked files from resolved upstream cache")?;
+    ensure_success(clean.status.success(), "git clean -fdx", &clean.stderr)?;
+
+    Ok(resolved_ref)
 }
 
 fn fetch_tarball(repo_root: &Path, lockfile: &Lockfile) -> Result<String> {
@@ -98,18 +156,38 @@ fn fetch_tarball(repo_root: &Path, lockfile: &Lockfile) -> Result<String> {
         .with_context(|| format!("reading tarball from {url}"))?;
 
     let digest = hex::encode(sha2::Sha256::digest(&bytes));
+    unpack_tarball(repo_root, &bytes, &url)?;
+    std::fs::write(repo_root.join(".cache/dwm-tarball.tar.gz"), &bytes)
+        .context("caching downloaded upstream tarball")?;
+    Ok(digest)
+}
+
+pub fn materialize_cached_tarball(repo_root: &Path, pinned_ref: &str) -> Result<()> {
+    let archive_path = repo_root.join(".cache/dwm-tarball.tar.gz");
+    let bytes = std::fs::read(&archive_path)
+        .with_context(|| format!("reading cached tarball {}", archive_path.display()))?;
+    let digest = hex::encode(sha2::Sha256::digest(&bytes));
+    if digest != pinned_ref {
+        anyhow::bail!(
+            "cached tarball SHA-256 mismatch: pinned {}, got {}",
+            pinned_ref,
+            digest
+        );
+    }
+    unpack_tarball(repo_root, &bytes, "cached tarball")
+}
+
+fn unpack_tarball(repo_root: &Path, bytes: &[u8], source: &str) -> Result<()> {
     let cache_parent = repo_root.join(".cache");
     std::fs::create_dir_all(&cache_parent)?;
     let cache_dir = cache_parent.join("dwm-tarball");
     let unpack_dir = tempfile::tempdir_in(&cache_parent)?;
-    let decoder = flate2::read::GzDecoder::new(bytes.as_slice());
+    let decoder = flate2::read::GzDecoder::new(bytes);
     let mut archive = tar::Archive::new(decoder);
     archive
         .unpack(unpack_dir.path())
-        .with_context(|| format!("unpacking tarball from {url}"))?;
-
-    replace_cache(&cache_dir, unpack_dir.path())?;
-    Ok(digest)
+        .with_context(|| format!("unpacking {source}"))?;
+    replace_cache(&cache_dir, unpack_dir.path())
 }
 
 fn replace_cache(cache_dir: &Path, unpacked_dir: &Path) -> Result<()> {
@@ -252,6 +330,14 @@ mod tests {
         let updated = Lockfile::load(&repo_root.join("config/dwm-lock.toml"))?;
         assert_eq!(updated.pinned_ref.len(), 40);
         assert_eq!(fetch_git(repo_root, &updated)?, updated.pinned_ref);
+        let cache_dir = repo_root.join(".cache/dwm-upstream");
+        let head = Command::new("git")
+            .args(["-C"])
+            .arg(cache_dir)
+            .args(["rev-parse", "HEAD"])
+            .output()?;
+        ensure_success(head.status.success(), "git rev-parse HEAD", &head.stderr)?;
+        assert_eq!(String::from_utf8(head.stdout)?.trim(), updated.pinned_ref);
         Ok(())
     }
 

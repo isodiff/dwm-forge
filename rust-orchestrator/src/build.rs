@@ -1,6 +1,6 @@
 use crate::cli::{BuildArgs, FetchArgs, FetchSource};
 use crate::fetch;
-use crate::lockfile::Lockfile;
+use crate::lockfile::{sha256_file, Lockfile};
 use anyhow::{Context, Result};
 use std::collections::HashSet;
 use std::fs;
@@ -103,7 +103,13 @@ pub fn run_build(repo_root: &Path, args: &BuildArgs) -> Result<()> {
     let lockfile_path = repo_root.join("config/dwm-lock.toml");
     let lockfile = Lockfile::load(&lockfile_path)
         .with_context(|| format!("loading lockfile {}", lockfile_path.display()))?;
-    let upstream_source = locate_cached_upstream(repo_root)?;
+    let pinned_ref = lockfile.pinned_ref.trim();
+    if pinned_ref.is_empty() {
+        anyhow::bail!(
+            "config/dwm-lock.toml has empty pinned_ref; run 'dwm-forge fetch --update-lock' first"
+        );
+    }
+    let upstream_source = locate_cached_upstream(repo_root, pinned_ref)?;
 
     // Keep an automatically-created temporary directory alive through the full build.
     let temporary_directory = if args.work_dir.is_none() {
@@ -113,6 +119,11 @@ pub fn run_build(repo_root: &Path, args: &BuildArgs) -> Result<()> {
     };
     let staging_dir = match (&args.work_dir, &temporary_directory) {
         (Some(work_dir), _) => {
+            if work_dir.exists() {
+                fs::remove_dir_all(work_dir).with_context(|| {
+                    format!("removing old work directory {}", work_dir.display())
+                })?;
+            }
             fs::create_dir_all(work_dir)
                 .with_context(|| format!("creating work directory {}", work_dir.display()))?;
             work_dir.clone()
@@ -203,37 +214,145 @@ pub fn run_build(repo_root: &Path, args: &BuildArgs) -> Result<()> {
     Ok(())
 }
 
-fn locate_cached_upstream(repo_root: &Path) -> Result<PathBuf> {
-    let cache_dir = repo_root.join(".cache");
-    let git_cache = cache_dir.join("dwm-upstream");
-    if git_cache.is_dir() {
-        return Ok(git_cache);
+fn locate_cached_upstream(repo_root: &Path, pinned_ref: &str) -> Result<PathBuf> {
+    if is_sha256(pinned_ref) {
+        return locate_cached_tarball(repo_root, pinned_ref);
+    }
+    if !is_git_sha(pinned_ref) {
+        anyhow::bail!(
+            "pinned_ref must be a 40-character Git SHA or a 64-character tarball SHA-256"
+        );
     }
 
-    let tarball_cache = cache_dir.join("dwm-tarball");
-    if tarball_cache.is_dir() {
-        let entries = fs::read_dir(&tarball_cache)?.collect::<std::io::Result<Vec<_>>>()?;
-        if entries.len() == 1 && entries[0].path().is_dir() {
-            return Ok(entries[0].path());
-        }
-        return Ok(tarball_cache);
+    let git_cache = repo_root.join(".cache/dwm-upstream");
+    if !git_cache.is_dir() {
+        fetch::run_fetch(
+            repo_root,
+            &FetchArgs {
+                source: FetchSource::Git,
+                update_lock: false,
+            },
+        )?;
     }
-
-    fetch::run_fetch(
-        repo_root,
-        &FetchArgs {
-            source: FetchSource::Git,
-            update_lock: false,
-        },
-    )?;
-    if git_cache.is_dir() {
-        Ok(git_cache)
-    } else {
+    if !git_cache.is_dir() {
         anyhow::bail!(
             "fetch completed but upstream cache {} is absent",
             git_cache.display()
+        );
+    }
+    ensure_git_checkout(&git_cache, pinned_ref)?;
+    Ok(git_cache)
+}
+
+fn locate_cached_tarball(repo_root: &Path, pinned_ref: &str) -> Result<PathBuf> {
+    let cache_parent = repo_root.join(".cache");
+    let archive_path = cache_parent.join("dwm-tarball.tar.gz");
+    let cached_hash = if archive_path.is_file() {
+        Some(sha256_file(&archive_path)?)
+    } else {
+        None
+    };
+
+    if cached_hash.as_deref() != Some(pinned_ref) {
+        fetch::run_fetch(
+            repo_root,
+            &FetchArgs {
+                source: FetchSource::Tarball,
+                update_lock: false,
+            },
+        )?;
+    }
+
+    let actual_hash = sha256_file(&archive_path)
+        .with_context(|| format!("reading cached tarball {}", archive_path.display()))?;
+    if actual_hash != pinned_ref {
+        anyhow::bail!(
+            "cached tarball SHA-256 mismatch: pinned {}, got {}",
+            pinned_ref,
+            actual_hash
+        );
+    }
+    fetch::materialize_cached_tarball(repo_root, pinned_ref)?;
+
+    let unpacked_dir = cache_parent.join("dwm-tarball");
+    let entries = fs::read_dir(&unpacked_dir)?.collect::<std::io::Result<Vec<_>>>()?;
+    if entries.len() == 1 && entries[0].path().is_dir() {
+        Ok(entries[0].path())
+    } else {
+        anyhow::bail!(
+            "expected one source directory in tarball cache {}",
+            unpacked_dir.display()
         )
     }
+}
+
+fn is_git_sha(value: &str) -> bool {
+    value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn is_sha256(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn ensure_git_checkout(cache_dir: &Path, pinned_ref: &str) -> Result<()> {
+    let commit_ref = format!("{pinned_ref}^{{commit}}");
+    let object = Command::new("git")
+        .args(["-C"])
+        .arg(cache_dir)
+        .args(["cat-file", "-e", &commit_ref])
+        .output()
+        .with_context(|| format!("checking for pinned commit {pinned_ref}"))?;
+
+    if !object.status.success() {
+        let fetch_output = Command::new("git")
+            .args(["-C"])
+            .arg(cache_dir)
+            .args(["fetch", "origin"])
+            .output()
+            .context("fetching origin to obtain pinned commit")?;
+        ensure_command_success("git fetch origin", fetch_output)?;
+    }
+
+    let pre_checkout_reset = Command::new("git")
+        .args(["-C"])
+        .arg(cache_dir)
+        .args(["reset", "--hard"])
+        .output()
+        .context("cleaning upstream cache before pinned checkout")?;
+    ensure_command_success("git reset --hard", pre_checkout_reset)?;
+    let pre_checkout_clean = Command::new("git")
+        .args(["-C"])
+        .arg(cache_dir)
+        .args(["clean", "-fdx"])
+        .output()
+        .context("removing untracked files from upstream cache")?;
+    ensure_command_success("git clean -fdx", pre_checkout_clean)?;
+
+    let checkout = Command::new("git")
+        .args(["-C"])
+        .arg(cache_dir)
+        .args(["checkout", "--detach"])
+        .arg(pinned_ref)
+        .output()
+        .with_context(|| format!("checking out pinned commit {pinned_ref}"))?;
+    ensure_command_success("git checkout --detach", checkout)?;
+
+    let reset = Command::new("git")
+        .args(["-C"])
+        .arg(cache_dir)
+        .args(["reset", "--hard"])
+        .arg(pinned_ref)
+        .output()
+        .with_context(|| format!("resetting cache to pinned commit {pinned_ref}"))?;
+    ensure_command_success("git reset --hard", reset)?;
+    let clean = Command::new("git")
+        .args(["-C"])
+        .arg(cache_dir)
+        .args(["clean", "-fdx"])
+        .output()
+        .context("removing untracked files from pinned upstream cache")?;
+    ensure_command_success("git clean -fdx", clean)?;
+    Ok(())
 }
 
 fn copy_upstream_files(upstream_source: &Path, staging_dir: &Path) -> Result<()> {
@@ -296,7 +415,23 @@ fn ensure_command_success(action: &str, output: Output) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
     use tempfile::tempdir;
+
+    fn git(cwd: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(cwd)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
 
     #[test]
     fn config_drift_checks_macros_and_static_const_identifiers() {
@@ -315,5 +450,179 @@ mod tests {
         .unwrap();
         let missing = check_config_drift(&default_path, &custom_path).unwrap();
         assert_eq!(missing, ["keys"]);
+    }
+
+    #[test]
+    fn build_fetches_and_checks_out_pinned_commit_and_cleans_work_dir() {
+        let temp = tempdir().unwrap();
+        let repo_root = temp.path().join("repo");
+        let bare = temp.path().join("upstream.git");
+        let seed = temp.path().join("seed");
+        fs::create_dir_all(repo_root.join("config")).unwrap();
+        fs::create_dir_all(repo_root.join("patches")).unwrap();
+        fs::create_dir(&bare).unwrap();
+        fs::create_dir(&seed).unwrap();
+        git(&bare, &["init", "--bare", "--initial-branch=master"]);
+        git(&seed, &["init", "--initial-branch=master"]);
+        git(&seed, &["config", "user.name", "dwm-forge tests"]);
+        git(
+            &seed,
+            &["config", "user.email", "dwm-forge-tests@example.invalid"],
+        );
+        fs::write(seed.join("Makefile"), "all:\n\t@true\nclean:\n\t@true\n").unwrap();
+        fs::write(seed.join("dwm.c"), "int source_revision = 1;\n").unwrap();
+        fs::write(seed.join("config.def.h"), "#define DEFAULT_PRESENT 1\n").unwrap();
+        git(&seed, &["add", "."]);
+        git(&seed, &["commit", "-m", "initial source"]);
+        git(&seed, &["remote", "add", "origin", bare.to_str().unwrap()]);
+        git(&seed, &["push", "origin", "master"]);
+
+        let cache_dir = repo_root.join(".cache/dwm-upstream");
+        fs::create_dir_all(cache_dir.parent().unwrap()).unwrap();
+        let clone = Command::new("git")
+            .args(["clone"])
+            .arg(&bare)
+            .arg(&cache_dir)
+            .output()
+            .unwrap();
+        assert!(
+            clone.status.success(),
+            "{}",
+            String::from_utf8_lossy(&clone.stderr)
+        );
+
+        fs::write(seed.join("dwm.c"), "int source_revision = 2;\n").unwrap();
+        git(&seed, &["add", "dwm.c"]);
+        git(&seed, &["commit", "-m", "pinned source revision"]);
+        git(&seed, &["push", "origin", "master"]);
+        let pinned_ref = git(&seed, &["rev-parse", "HEAD"]);
+        fs::write(
+            repo_root.join("config/config.h"),
+            "#define DEFAULT_PRESENT 1\n",
+        )
+        .unwrap();
+        Lockfile {
+            upstream_url: bare.to_string_lossy().into_owned(),
+            upstream_tarball_base: String::new(),
+            pinned_ref: pinned_ref.clone(),
+            dwm_version: "6.5".into(),
+            patches: BTreeMap::new(),
+        }
+        .save(&repo_root.join("config/dwm-lock.toml"))
+        .unwrap();
+        fs::write(cache_dir.join("dwm.c"), "dirty cached worktree\n").unwrap();
+        fs::write(cache_dir.join("untracked-cache-file"), "stale").unwrap();
+
+        let work_dir = repo_root.join("stage");
+        fs::create_dir_all(work_dir.join("stale/nested")).unwrap();
+        fs::write(work_dir.join("stale/nested/file"), "stale").unwrap();
+        fs::write(work_dir.join("obsolete.txt"), "obsolete").unwrap();
+        let args = BuildArgs {
+            work_dir: Some(work_dir.clone()),
+            skip_hash_check: false,
+            patch_only: true,
+            c_test_dir: None,
+        };
+
+        run_build(&repo_root, &args).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(work_dir.join("dwm.c")).unwrap(),
+            "int source_revision = 2;\n"
+        );
+        assert!(!work_dir.join("stale").exists());
+        assert!(!work_dir.join("obsolete.txt").exists());
+        assert!(!cache_dir.join("untracked-cache-file").exists());
+        assert_eq!(git(&cache_dir, &["rev-parse", "HEAD"]), pinned_ref);
+        assert!(git(&cache_dir, &["status", "--porcelain"]).is_empty());
+    }
+
+    #[test]
+    fn build_uses_tarball_cache_when_pinned_sha256_matches_archive() {
+        let temp = tempdir().unwrap();
+        let repo_root = temp.path();
+        let cache_dir = repo_root.join(".cache/dwm-tarball");
+        let source_dir = cache_dir.join("dwm-6.5");
+        fs::create_dir_all(&source_dir).unwrap();
+        fs::create_dir_all(repo_root.join("config")).unwrap();
+        fs::create_dir_all(repo_root.join("patches")).unwrap();
+        fs::write(source_dir.join("dwm.c"), "int tarball_source = 1;\n").unwrap();
+        fs::write(source_dir.join("config.def.h"), "#define PRESENT 1\n").unwrap();
+        fs::write(repo_root.join("config/config.h"), "#define PRESENT 1\n").unwrap();
+        let archive_path = repo_root.join(".cache/dwm-tarball.tar.gz");
+        let archive_file = fs::File::create(&archive_path).unwrap();
+        let gzip = flate2::write::GzEncoder::new(archive_file, flate2::Compression::default());
+        let mut archive = tar::Builder::new(gzip);
+        for (name, contents) in [
+            ("dwm-6.5/dwm.c", "int tarball_source = 1;\n"),
+            ("dwm-6.5/config.def.h", "#define PRESENT 1\n"),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(contents.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            archive
+                .append_data(&mut header, name, contents.as_bytes())
+                .unwrap();
+        }
+        archive.into_inner().unwrap().finish().unwrap();
+        let pinned_ref = sha256_file(&archive_path).unwrap();
+        Lockfile {
+            upstream_url: String::new(),
+            upstream_tarball_base: String::new(),
+            pinned_ref,
+            dwm_version: "6.5".into(),
+            patches: BTreeMap::new(),
+        }
+        .save(&repo_root.join("config/dwm-lock.toml"))
+        .unwrap();
+        fs::write(source_dir.join("dwm.c"), "tampered unpacked cache\n").unwrap();
+
+        let work_dir = repo_root.join("stage");
+        run_build(
+            repo_root,
+            &BuildArgs {
+                work_dir: Some(work_dir.clone()),
+                skip_hash_check: false,
+                patch_only: true,
+                c_test_dir: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(work_dir.join("dwm.c")).unwrap(),
+            "int tarball_source = 1;\n"
+        );
+    }
+
+    #[test]
+    fn build_requires_a_non_empty_pinned_ref() {
+        let temp = tempdir().unwrap();
+        let repo_root = temp.path();
+        fs::create_dir_all(repo_root.join("config")).unwrap();
+        Lockfile {
+            upstream_url: String::new(),
+            upstream_tarball_base: String::new(),
+            pinned_ref: "  ".into(),
+            dwm_version: "6.5".into(),
+            patches: BTreeMap::new(),
+        }
+        .save(&repo_root.join("config/dwm-lock.toml"))
+        .unwrap();
+
+        let error = run_build(
+            repo_root,
+            &BuildArgs {
+                work_dir: None,
+                skip_hash_check: false,
+                patch_only: true,
+                c_test_dir: None,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "config/dwm-lock.toml has empty pinned_ref; run 'dwm-forge fetch --update-lock' first"
+        );
     }
 }

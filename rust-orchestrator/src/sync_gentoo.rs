@@ -52,6 +52,7 @@ pub fn run_sync_gentoo(args: &SyncGentooArgs) -> Result<()> {
         .find(|asset| asset.name == "SHA256SUMS")
         .context("latest release has no SHA256SUMS asset")?;
     validate_asset_name(&archive_asset.name)?;
+    let gentoo_distfile_name = gentoo_distfile_name(&archive_asset.name)?;
 
     let temporary_directory = tempfile::tempdir().context("creating download directory")?;
     let archive_path = temporary_directory.path().join(&archive_asset.name);
@@ -65,9 +66,10 @@ pub fn run_sync_gentoo(args: &SyncGentooArgs) -> Result<()> {
 
     if args.dry_run {
         println!(
-            "DRY_RUN: verified {} and config.h; would sync savedconfig to {} and distfile to {}",
+            "DRY_RUN: verified {}; would install config.h at {}, and stage {} in {}",
             archive_asset.name,
             args.savedconfig_path.display(),
+            gentoo_distfile_name,
             args.distdir.display()
         );
         return Ok(());
@@ -85,6 +87,11 @@ pub fn run_sync_gentoo(args: &SyncGentooArgs) -> Result<()> {
     let distfile_path = args.distdir.join(&archive_asset.name);
     fs::copy(&archive_path, &distfile_path)
         .with_context(|| format!("copying distfile to {}", distfile_path.display()))?;
+    if gentoo_distfile_name != archive_asset.name {
+        let ebuild_distfile = args.distdir.join(&gentoo_distfile_name);
+        fs::copy(&archive_path, &ebuild_distfile)
+            .with_context(|| format!("copying Gentoo distfile to {}", ebuild_distfile.display()))?;
+    }
 
     let mut ebuild = Command::new("ebuild");
     ebuild.arg(&args.ebuild_path).arg("manifest");
@@ -163,6 +170,23 @@ fn validate_asset_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+fn gentoo_distfile_name(release_asset_name: &str) -> Result<String> {
+    let stem = release_asset_name
+        .strip_prefix("dwm-patched-")
+        .and_then(|name| name.strip_suffix(".tar.gz"))
+        .context("release tarball name must be dwm-patched-<version>-<sha>.tar.gz")?;
+    let (version, short_sha) = stem
+        .rsplit_once('-')
+        .context("release tarball name is missing the short SHA suffix")?;
+    if version.is_empty()
+        || short_sha.len() != 12
+        || !short_sha.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        anyhow::bail!("release tarball name has an invalid version or short SHA suffix");
+    }
+    Ok(format!("dwm-patched-{version}.tar.gz"))
+}
+
 fn verify_one(checksums: &BTreeMap<String, String>, name: &str, path: &Path) -> Result<()> {
     let expected = checksums
         .get(name)
@@ -203,6 +227,14 @@ mod tests {
         assert_eq!(parsed.len(), 2);
         assert!(parsed.contains_key("dwm.tar.gz"));
         assert!(parsed.contains_key("config.h"));
+    }
+
+    #[test]
+    fn maps_release_archive_name_to_ebuild_distfile_name() {
+        assert_eq!(
+            gentoo_distfile_name("dwm-patched-6.5-0123456789ab.tar.gz").unwrap(),
+            "dwm-patched-6.5.tar.gz"
+        );
     }
 
     #[test]
