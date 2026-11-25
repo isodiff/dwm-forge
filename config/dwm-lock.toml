@@ -1,0 +1,13 @@
+upstream_url = "https://git.suckless.org/dwm"
+
+upstream_tarball_base = "https://dl.suckless.org/dwm"
+
+pinned_ref = ""
+
+dwm_version = "6.5"
+
+[patches]
+01-alpha.diff = "3e14d975e6dc1194254525fbd9e0879029f1edc1eacf9dcb9d445d87f36932d4"
+02-cfacts.diff = "c9fc12f9b9641f8e5c34a4240739a54d31f70ee517e6c1fd20f233928be0924a"
+03-vanitygaps-cfacts.diff = "cc696c454ee15caf1e7d09f4fc06cb7108accf4cfe73977a68a132cc454f0f64"
+04-statuscmd.diff = "c3390b130d254df4c5c7e23013ea9c5c12490399c18acf509c2642ae4a3b111c"
