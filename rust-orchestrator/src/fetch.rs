@@ -11,7 +11,7 @@ pub fn run_fetch(repo_root: &Path, args: &FetchArgs) -> Result<()> {
     let mut lockfile = Lockfile::load(&lock_path)
         .with_context(|| format!("loading lockfile {}", lock_path.display()))?;
 
-    let resolved_ref = match args.source {
+let resolved_ref = match args.source.clone() {
         FetchSource::Git => fetch_git(repo_root, &lockfile)?,
         FetchSource::Tarball => fetch_tarball(repo_root, &lockfile)?,
     };
