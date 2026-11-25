@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
+use sha2::Digest;
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
-use sha2::Digest;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Lockfile {
@@ -17,8 +17,7 @@ pub struct Lockfile {
 impl Lockfile {
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)?;
-        let lockfile: Lockfile = toml::from_str(&content)?;
-        Ok(lockfile)
+        Ok(toml::from_str(&content)?)
     }
 
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
@@ -28,36 +27,58 @@ impl Lockfile {
     }
 
     pub fn sha256_file(path: &Path) -> anyhow::Result<String> {
-        let mut file = File::open(path)?;
-        let mut buffer = Vec::new();
-        file.read_to_end(&mut buffer)?;
-
-        let result = sha2::Sha256::digest(&buffer);
-        Ok(hex::encode(result).to_lowercase())
+        sha256_file(path)
     }
 
     pub fn verify_patches(&self, patches_dir: &Path) -> anyhow::Result<()> {
-        for (patch_name, expected_hash) in &self.patches {
-            let patch_path = patches_dir.join(patch_name);
-            if !patch_path.exists() {
-                return Err(anyhow::anyhow!(
-                    "Patch file {} does not exist",
-                    patch_name
-                ));
-            }
-            
-            let actual_hash = Self::sha256_file(&patch_path)?;
-            if actual_hash != *expected_hash {
-                return Err(anyhow::anyhow!(
+        let mut patch_paths = std::fs::read_dir(patches_dir)?
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| path.extension().is_some_and(|ext| ext == "diff"))
+            .collect::<Vec<_>>();
+        patch_paths.sort();
+
+        for path in patch_paths {
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| anyhow::anyhow!("Invalid patch filename: {}", path.display()))?;
+            let expected = self
+                .patches
+                .get(name)
+                .ok_or_else(|| anyhow::anyhow!("Patch {} is missing from [patches]", name))?;
+            let actual = sha256_file(&path)?;
+            if actual != *expected {
+                anyhow::bail!(
                     "Patch hash mismatch for {}: expected {}, got {}",
-                    patch_name,
-                    expected_hash,
-                    actual_hash
-                ));
+                    name,
+                    expected,
+                    actual
+                );
             }
         }
+
+        for name in self.patches.keys() {
+            if !patches_dir.join(name).is_file() {
+                anyhow::bail!("Patch file {} does not exist", name);
+            }
+        }
+
         Ok(())
     }
+}
+
+pub fn sha256_file(path: &Path) -> anyhow::Result<String> {
+    let mut file = File::open(path)?;
+    let mut hasher = sha2::Sha256::new();
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let bytes_read = file.read(&mut buffer)?;
+        if bytes_read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..bytes_read]);
+    }
+    Ok(hex::encode(hasher.finalize()))
 }
 
 #[cfg(test)]
@@ -66,53 +87,43 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn test_round_trip_save_load() {
-        let dir = tempdir().unwrap();
-        let lockfile_path = dir.path().join("lockfile.toml");
-
-        let original_lockfile = Lockfile {
-            upstream_url: "https://git.suckless.org/dwm".to_string(),
-            upstream_tarball_base: "dwm-6.4".to_string(),
-            pinned_ref: "v6.4".to_string(),
-            dwm_version: "6.4".to_string(),
-            patches: BTreeMap::from([
-                ("01-alpha.diff".to_string(), "abc123def456".to_string()),
-                ("02-cfacts.diff".to_string(), "def456abc123".to_string()),
-            ]),
-        };
-
-        // Save
-        original_lockfile.save(&lockfile_path).unwrap();
-
-        // Load
-        let loaded_lockfile = Lockfile::load(&lockfile_path).unwrap();
-
-        // Verify they're equal
-        assert_eq!(original_lockfile, loaded_lockfile);
-    }
-
-    #[test]
-    fn test_patch_hash_mismatch() {
+    fn save_load_and_verify_patch_hashes() {
         let dir = tempdir().unwrap();
         let patches_dir = dir.path().join("patches");
         std::fs::create_dir(&patches_dir).unwrap();
-
-        // Create a patch file with one content
-        let patch_path = patches_dir.join("01-alpha.diff");
-        std::fs::write(&patch_path, "some content").unwrap();
+        let patch = patches_dir.join("01-test.diff");
+        std::fs::write(&patch, "patch content").unwrap();
 
         let lockfile = Lockfile {
-            upstream_url: "https://git.suckless.org/dwm".to_string(),
-            upstream_tarball_base: "dwm-6.4".to_string(),
-            pinned_ref: "v6.4".to_string(),
-            dwm_version: "6.4".to_string(),
-            patches: BTreeMap::from([
-                ("01-alpha.diff".to_string(), "wrong_hash".to_string()),
-            ]),
+            upstream_url: "https://git.suckless.org/dwm".into(),
+            upstream_tarball_base: "https://dl.suckless.org/dwm".into(),
+            pinned_ref: String::new(),
+            dwm_version: "6.5".into(),
+            patches: BTreeMap::from([("01-test.diff".into(), sha256_file(&patch).unwrap())]),
         };
+        let lock_path = dir.path().join("lock.toml");
+        lockfile.save(&lock_path).unwrap();
+        let loaded = Lockfile::load(&lock_path).unwrap();
+        assert_eq!(lockfile, loaded);
+        loaded.verify_patches(&patches_dir).unwrap();
 
-        // This should fail due to hash mismatch
-        let result = lockfile.verify_patches(&patches_dir);
-        assert!(result.is_err());
+        std::fs::write(&patch, "corrupted").unwrap();
+        assert!(loaded.verify_patches(&patches_dir).is_err());
+    }
+
+    #[test]
+    fn rejects_unmapped_diff_file() {
+        let dir = tempdir().unwrap();
+        let patches_dir = dir.path().join("patches");
+        std::fs::create_dir(&patches_dir).unwrap();
+        std::fs::write(patches_dir.join("01-extra.diff"), "content").unwrap();
+        let lockfile = Lockfile {
+            upstream_url: String::new(),
+            upstream_tarball_base: String::new(),
+            pinned_ref: String::new(),
+            dwm_version: String::new(),
+            patches: BTreeMap::new(),
+        };
+        assert!(lockfile.verify_patches(&patches_dir).is_err());
     }
 }

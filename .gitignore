@@ -8,6 +8,8 @@ __pycache__/
 .pytest_cache/
 .coverage
 dist/
+*.tar.gz
+.cache/
 
 # Temporary build directories
 /tmp-build/
