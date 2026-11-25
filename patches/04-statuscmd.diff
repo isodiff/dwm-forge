@@ -1,31 +1,15 @@
-From 5c4db00890ed6f967dc14b80e704a0cd89faa209 Mon Sep 17 00:00:00 2001
-From: Justinas Grigas <dev@jstnas.com>
-Date: Tue, 8 Oct 2024 17:55:11 +0100
-Subject: [PATCH] dwm statuscmd: support all mouse buttons
-
-This patch enables all mouse buttons to interact with the status bar
-script.
-
-It also fixes getstatusbarpid declaration.
----
- config.def.h |  12 +++++-
- dwm.c        | 104 ++++++++++++++++++++++++++++++++++++++++++++++++---
- 2 files changed, 110 insertions(+), 6 deletions(-)
-
-diff --git a/config.def.h b/config.def.h
-index 81c3fc0..dbe798b 100644
 --- a/config.def.h
 +++ b/config.def.h
-@@ -56,6 +56,8 @@ static const Layout layouts[] = {
+@@ -78,6 +78,8 @@ static const Layout layouts[] = {
  /* helper for spawning shell commands in the pre dwm-5.0 fashion */
  #define SHCMD(cmd) { .v = (const char*[]){ "/bin/sh", "-c", cmd, NULL } }
  
 +#define STATUSBAR "dwmblocks"
 +
  /* commands */
- static char dmenumon[2] = "0"; /* component of dmenucmd, manipulated in spawn() */
+ static char dmenumon[8]; /* component of dmenucmd, manipulated in spawn() */
  static const char *dmenucmd[] = { "dmenu_run", "-m", dmenumon, "-fn", dmenufont, "-nb", col_gray1, "-nf", col_gray3, "-sb", col_cyan, "-sf", col_gray4, NULL };
-@@ -105,7 +107,15 @@ static const Button buttons[] = {
+@@ -146,7 +148,15 @@ static const Button buttons[] = {
  	{ ClkLtSymbol,          0,              Button1,        setlayout,      {0} },
  	{ ClkLtSymbol,          0,              Button3,        setlayout,      {.v = &layouts[2]} },
  	{ ClkWinTitle,          0,              Button2,        zoom,           {0} },
@@ -42,11 +26,9 @@ index 81c3fc0..dbe798b 100644
  	{ ClkClientWin,         MODKEY,         Button1,        movemouse,      {0} },
  	{ ClkClientWin,         MODKEY,         Button2,        togglefloating, {0} },
  	{ ClkClientWin,         MODKEY,         Button3,        resizemouse,    {0} },
-diff --git a/dwm.c b/dwm.c
-index 53b393e..dbaef27 100644
 --- a/dwm.c
 +++ b/dwm.c
-@@ -171,6 +171,7 @@ static void focusstack(const Arg *arg);
+@@ -179,6 +179,7 @@ static void focusstack(const Arg *arg);
  static Atom getatomprop(Client *c, Atom prop);
  static int getrootptr(int *x, int *y);
  static long getstate(Window w);
@@ -54,7 +36,7 @@ index 53b393e..dbaef27 100644
  static int gettextprop(Window w, Atom atom, char *text, unsigned int size);
  static void grabbuttons(Client *c, int focused);
  static void grabkeys(void);
-@@ -204,6 +205,7 @@ static void setmfact(const Arg *arg);
+@@ -213,6 +214,7 @@ static void setmfact(const Arg *arg);
  static void setup(void);
  static void seturgent(Client *c, int urg);
  static void showhide(Client *c);
@@ -62,17 +44,19 @@ index 53b393e..dbaef27 100644
  static void spawn(const Arg *arg);
  static void tag(const Arg *arg);
  static void tagmon(const Arg *arg);
-@@ -236,6 +238,9 @@ static void zoom(const Arg *arg);
+@@ -246,6 +248,11 @@ static void zoom(const Arg *arg);
  /* variables */
  static const char broken[] = "broken";
  static char stext[256];
 +static int statusw;
 +static int statussig;
++static int statuscmdn;
++static unsigned int lastbutton;
 +static pid_t statuspid = -1;
  static int screen;
  static int sw, sh;           /* X display screen geometry width, height */
  static int bh;               /* bar height */
-@@ -422,6 +427,7 @@ buttonpress(XEvent *e)
+@@ -435,6 +442,7 @@ buttonpress(XEvent *e)
  	Client *c;
  	Monitor *m;
  	XButtonPressedEvent *ev = &e->xbutton;
@@ -80,16 +64,18 @@ index 53b393e..dbaef27 100644
  
  	click = ClkRootWin;
  	/* focus monitor if necessary */
-@@ -440,9 +446,27 @@ buttonpress(XEvent *e)
+@@ -453,9 +461,27 @@ buttonpress(XEvent *e)
  			arg.ui = 1 << i;
  		} else if (ev->x < x + TEXTW(selmon->ltsymbol))
  			click = ClkLtSymbol;
--		else if (ev->x > selmon->ww - (int)TEXTW(stext))
+-		else if (ev->x > selmon->ww - (int)TEXTW(stext) + lrpad - 2)
 +		else if (ev->x > selmon->ww - statusw) {
 +			x = selmon->ww - statusw;
  			click = ClkStatusText;
 -		else
 +			statussig = 0;
++			statuscmdn = 0;
++			lastbutton = ev->button;
 +			for (text = s = stext; *s && x <= ev->x; s++) {
 +				if ((unsigned char)(*s) < ' ') {
 +					ch = *s;
@@ -99,18 +85,16 @@ index 53b393e..dbaef27 100644
 +					text = s + 1;
 +					if (x >= ev->x)
 +						break;
-+					/* End clickable section on a matching signal raw byte */
-+					if (statussig == ch)
-+						statussig = 0;
-+					else
-+						statussig = ch;
++					/* End clickable section on a matching signal byte. */
++					statussig = statussig == ch ? 0 : ch;
 +				}
 +			}
++			statuscmdn = statussig;
 +		} else
  			click = ClkWinTitle;
  	} else if ((c = wintoclient(ev->window))) {
  		focus(c);
-@@ -708,9 +732,24 @@ drawbar(Monitor *m)
+@@ -728,9 +754,24 @@ drawbar(Monitor *m)
  
  	/* draw status first so it can be overdrawn by tags later */
  	if (m == selmon) { /* status is only drawn on selected monitor */
@@ -137,7 +121,7 @@ index 53b393e..dbaef27 100644
  	}
  
  	for (c = m->clients; c; c = c->next) {
-@@ -877,6 +916,30 @@ getatomprop(Client *c, Atom prop)
+@@ -897,6 +938,30 @@ getatomprop(Client *c, Atom prop)
  	return atom;
  }
  
@@ -168,28 +152,28 @@ index 53b393e..dbaef27 100644
  int
  getrootptr(int *x, int *y)
  {
-@@ -1644,6 +1707,20 @@ showhide(Client *c)
- 	}
+@@ -1685,6 +1750,20 @@ showhide(Client *c)
  }
  
-+void
+ void
 +sigstatusbar(const Arg *arg)
 +{
 +	union sigval sv;
 +
-+	if (!statussig)
++	if (!statuscmdn || !arg)
 +		return;
-+	sv.sival_int = arg->i;
++	sv.sival_int = arg->i ? arg->i : (int)lastbutton;
 +	if ((statuspid = getstatusbarpid()) <= 0)
 +		return;
 +
-+	sigqueue(statuspid, SIGRTMIN+statussig, sv);
++	sigqueue(statuspid, SIGRTMIN + statuscmdn, sv);
 +}
 +
- void
++void
  spawn(const Arg *arg)
  {
-@@ -2005,8 +2082,25 @@ updatesizehints(Client *c)
+ 	struct sigaction sa;
+@@ -2028,8 +2107,25 @@ updatesizehints(Client *c)
  void
  updatestatus(void)
  {
@@ -216,7 +200,3 @@ index 53b393e..dbaef27 100644
  	drawbar(selmon);
  }
  
--- 
-2.52.0
-
-

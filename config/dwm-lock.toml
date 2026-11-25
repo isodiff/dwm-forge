@@ -1,10 +1,10 @@
 upstream_url = "https://git.suckless.org/dwm"
 upstream_tarball_base = "https://dl.suckless.org/dwm"
 pinned_ref = "1563572d1de565ebbe8b8d4eaf9f538f9b68f355"
-dwm_version = "6.5"
+dwm_version = "6.8"
 
 [patches]
-"01-alpha.diff" = "3e14d975e6dc1194254525fbd9e0879029f1edc1eacf9dcb9d445d87f36932d4"
-"02-cfacts.diff" = "c9fc12f9b9641f8e5c34a4240739a54d31f70ee517e6c1fd20f233928be0924a"
-"03-vanitygaps-cfacts.diff" = "cc696c454ee15caf1e7d09f4fc06cb7108accf4cfe73977a68a132cc454f0f64"
-"04-statuscmd.diff" = "c3390b130d254df4c5c7e23013ea9c5c12490399c18acf509c2642ae4a3b111c"
+"01-alpha.diff" = "a4fe924ae63d50482a63d308f5d074dc13d676bc4bf08d0a575d4e26af9b1aa1"
+"02-cfacts.diff" = "f32f674eee6d525d476812bd7355dce8ee86af5cd448a72bd07eaa71e13487f0"
+"03-vanitygaps-cfacts.diff" = "4395241dd25578e4945e073903e248867d074f9b93163ad5a8b123dfb6d32c3f"
+"04-statuscmd.diff" = "3b9fe2cc5d68c90b0e742e175ce6f2e6b7a0f20f8d6c0aa8c2d3d42d2904f2a3"
