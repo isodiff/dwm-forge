@@ -13,6 +13,18 @@
 #endif
 
 #define ARRAY_LEN(array) (sizeof(array) / sizeof((array)[0]))
+#define STATIC_ASSERT(name, expression) typedef char static_assert_##name[(expression) ? 1 : -1]
+
+STATIC_ASSERT(alpha_colors_are_nonempty, ARRAY_LEN(alphas) > 0);
+STATIC_ASSERT(client_has_cfact, sizeof(((Client *)0)->cfact) == sizeof(float));
+STATIC_ASSERT(monitor_has_gappih, sizeof(((Monitor *)0)->gappih) == sizeof(int));
+STATIC_ASSERT(monitor_has_gappiv, sizeof(((Monitor *)0)->gappiv) == sizeof(int));
+STATIC_ASSERT(monitor_has_gappoh, sizeof(((Monitor *)0)->gappoh) == sizeof(int));
+STATIC_ASSERT(monitor_has_gappov, sizeof(((Monitor *)0)->gappov) == sizeof(int));
+STATIC_ASSERT(status_width_symbol_exists, sizeof(statusw) > 0);
+STATIC_ASSERT(status_signal_symbol_exists, sizeof(statussig) > 0);
+STATIC_ASSERT(status_pid_symbol_exists, sizeof(statuspid) > 0);
+STATIC_ASSERT(button_has_handler_field, sizeof(((Button *)0)->func) > 0);
 
 static int
 verify_alpha(void)

@@ -14,6 +14,7 @@ RUN apt-get update \
         libx11-dev \
         libxft-dev \
         libxinerama-dev \
+        libxrender-dev \
         libfreetype-dev \
         fontconfig \
         xvfb \

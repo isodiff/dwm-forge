@@ -1,9 +1,6 @@
 upstream_url = "https://git.suckless.org/dwm"
-
 upstream_tarball_base = "https://dl.suckless.org/dwm"
-
-pinned_ref = ""
-
+pinned_ref = "1563572d1de565ebbe8b8d4eaf9f538f9b68f355"
 dwm_version = "6.5"
 
 [patches]

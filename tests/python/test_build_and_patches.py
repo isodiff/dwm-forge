@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import tomllib
 from collections.abc import Callable
 
 from conftest import MockRepository
@@ -8,10 +9,18 @@ from conftest import MockRepository
 CliRunner = Callable[..., subprocess.CompletedProcess[str]]
 
 
+def pin_upstream(mock_repo: MockRepository, run_cli: CliRunner) -> None:
+    result = run_cli(mock_repo.root, "fetch", "--update-lock")
+    assert result.returncode == 0, result.stderr
+    lockfile = tomllib.loads((mock_repo.root / "config" / "dwm-lock.toml").read_text())
+    mock_repo.pinned_ref = lockfile["pinned_ref"]
+
+
 def test_patch_only_applies_patches_in_order_and_copies_config(
     mock_repo: MockRepository,
     run_cli: CliRunner,
 ) -> None:
+    pin_upstream(mock_repo, run_cli)
     staging = mock_repo.root / "stage"
     result = run_cli(
         mock_repo.root,
@@ -32,6 +41,7 @@ def test_build_rejects_patch_hash_mismatch(
     mock_repo: MockRepository,
     run_cli: CliRunner,
 ) -> None:
+    pin_upstream(mock_repo, run_cli)
     patch_path = mock_repo.root / "patches" / "01-first.diff"
     patch_path.write_text(patch_path.read_text() + "# changed without updating the lock\n")
 
@@ -45,6 +55,7 @@ def test_build_rejects_patch_hunk_conflict(
     mock_repo: MockRepository,
     run_cli: CliRunner,
 ) -> None:
+    pin_upstream(mock_repo, run_cli)
     second_patch = mock_repo.root / "patches" / "02-second.diff"
     second_patch.write_text(
         "--- a/dwm.c\n"
@@ -67,6 +78,7 @@ def test_build_warns_for_default_define_missing_from_user_config(
     mock_repo: MockRepository,
     run_cli: CliRunner,
 ) -> None:
+    pin_upstream(mock_repo, run_cli)
     result = run_cli(
         mock_repo.root,
         "build",

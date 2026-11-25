@@ -112,6 +112,7 @@ def test_package_is_deterministic_and_writes_valid_checksums(
         assert "dwm-patched-6.5-0123456789ab/nested/source.h" in names
         assert all(member.mtime == 0 for member in members)
         assert all(member.uid == 0 and member.gid == 0 for member in members)
+        assert all(member.uname == "" and member.gname == "" for member in members)
 
     expected_lines = [
         f"{hashlib.sha256(archive_one.read_bytes()).hexdigest()}  {ARCHIVE_NAME}",

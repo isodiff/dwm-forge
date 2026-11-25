@@ -13,10 +13,24 @@ pub fn run_package(repo_root: &Path, args: &PackageArgs) -> Result<()> {
     let lockfile = Lockfile::load(&lockfile_path)
         .with_context(|| format!("loading lockfile {}", lockfile_path.display()))?;
     let staging_dir = resolve_path(repo_root, &args.staging_dir);
-    let out_dir = resolve_path(repo_root, &args.out_dir);
     if !staging_dir.is_dir() {
         anyhow::bail!(
             "staging directory does not exist: {}",
+            staging_dir.display()
+        );
+    }
+    let staging_dir = fs::canonicalize(&staging_dir)
+        .with_context(|| format!("canonicalizing staging directory {}", staging_dir.display()))?;
+
+    let out_dir = resolve_path(repo_root, &args.out_dir);
+    fs::create_dir_all(&out_dir)
+        .with_context(|| format!("creating output directory {}", out_dir.display()))?;
+    let out_dir = fs::canonicalize(&out_dir)
+        .with_context(|| format!("canonicalizing output directory {}", out_dir.display()))?;
+    if out_dir.starts_with(&staging_dir) {
+        anyhow::bail!(
+            "output directory {} must not be inside staging directory {}",
+            out_dir.display(),
             staging_dir.display()
         );
     }
@@ -61,8 +75,6 @@ pub fn run_package(repo_root: &Path, args: &PackageArgs) -> Result<()> {
         left_relative.cmp(right_relative)
     });
 
-    fs::create_dir_all(&out_dir)
-        .with_context(|| format!("creating output directory {}", out_dir.display()))?;
     write_archive(&archive_path, &staging_dir, &top_level, &entries)?;
 
     let config_output = out_dir.join("config.h");
@@ -233,5 +245,36 @@ mod tests {
                 .next()
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn rejects_output_directory_nested_in_staging() {
+        let temp = tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        let staging = repo.join("stage");
+        fs::create_dir_all(&staging).unwrap();
+        fs::create_dir_all(repo.join("config")).unwrap();
+        Lockfile {
+            upstream_url: String::new(),
+            upstream_tarball_base: String::new(),
+            pinned_ref: String::new(),
+            dwm_version: "6.5".into(),
+            patches: BTreeMap::new(),
+        }
+        .save(&repo.join("config/dwm-lock.toml"))
+        .unwrap();
+
+        let error = run_package(
+            &repo,
+            &PackageArgs {
+                staging_dir: PathBuf::from("stage"),
+                out_dir: PathBuf::from("stage/release/output"),
+                sha: "0123456789ab".into(),
+            },
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("must not be inside staging directory"));
     }
 }
