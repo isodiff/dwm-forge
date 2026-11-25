@@ -1,0 +1,39 @@
+name: Watch upstream dwm
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  check-upstream:
+    runs-on: ubuntu-latest
+    permissions: { contents: write, pull-requests: write }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build orchestrator
+        run: cargo build --release --manifest-path rust-orchestrator/Cargo.toml
+      - name: Check upstream and open an update pull request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "$GITHUB_WORKSPACE/rust-orchestrator/target/release" >> "$GITHUB_PATH"
+          dwm-forge fetch --update-lock
+          if ! git diff --quiet -- config/dwm-lock.toml; then
+            branch="sync/upstream-${{ github.run_id }}"
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git switch -c "$branch"
+            git add config/dwm-lock.toml
+            git commit -m "chore: update pinned dwm upstream ref"
+            git push --set-upstream origin "$branch"
+            gh pr create \
+              --base main \
+              --head "$branch" \
+              --title "chore: update dwm upstream ref" \
+              --body "Updates config/dwm-lock.toml to the latest upstream dwm commit." \
+              --reviewer isodiff
+          fi
