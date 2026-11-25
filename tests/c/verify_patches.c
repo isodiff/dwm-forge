@@ -24,6 +24,8 @@ STATIC_ASSERT(monitor_has_gappov, sizeof(((Monitor *)0)->gappov) == sizeof(int))
 STATIC_ASSERT(status_width_symbol_exists, sizeof(statusw) > 0);
 STATIC_ASSERT(status_signal_symbol_exists, sizeof(statussig) > 0);
 STATIC_ASSERT(status_pid_symbol_exists, sizeof(statuspid) > 0);
+STATIC_ASSERT(status_command_number_exists, sizeof(statuscmdn) > 0);
+STATIC_ASSERT(status_last_button_exists, sizeof(lastbutton) > 0);
 STATIC_ASSERT(button_has_handler_field, sizeof(((Button *)0)->func) > 0);
 
 static int

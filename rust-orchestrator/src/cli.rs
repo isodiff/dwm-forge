@@ -57,7 +57,7 @@ pub struct SyncGentooArgs {
     pub distdir: PathBuf,
     #[arg(
         long,
-        default_value = "/var/db/repos/dwm-forge-local/x11-wm/dwm/dwm-6.5-r100.ebuild"
+        default_value = "/var/db/repos/dwm-forge-local/x11-wm/dwm/dwm-6.8-r100.ebuild"
     )]
     pub ebuild_path: PathBuf,
     #[arg(long, default_value_t = false)]
